@@ -89,15 +89,21 @@ def load_tables_from_excel(file_obj):
 
 
 def solve_for_job(job_row, food, mem, inv_food, inv_mem, capacity=RACK_CAPACITY):
-    food_names = food["Food"].tolist()
-    mem_names = mem["Memory"].tolist()
-    nF, nM = len(food_names), len(mem_names)
+    w_food = food["ItemWeight"].to_numpy()
+    w_mem = mem["ItemWeight"].to_numpy()
+    w = np.concatenate([w_food, w_mem])  # still used for rack capacity constraint
 
-    lb = np.zeros(nF + nM)
-    ub = np.array(
-        [inv_food.get(n, 0) for n in food_names] +
-        [inv_mem.get(n, 0) for n in mem_names],
-        dtype=float
+    # objective choices
+    # 1) minimize memory item count
+    mem_count_cost = np.ones(nM)
+    c = np.concatenate([np.zeros(nF), mem_count_cost])
+
+    # 2) minimize memory ingredient weight instead
+    # c = np.concatenate([np.zeros(nF), w_mem])
+
+    # 3) minimize weighted rarity cost, you supply a dict like {"Camera": 50, "Blueprints": 10, ...}
+    # rarity_cost = np.array([rarity_weights.get(name, 1.0) for name in mem_names], dtype=float)
+    # c = np.concatenate([np.zeros(nF), rarity_cost])
     )
 
     w = np.concatenate([food["ItemWeight"].to_numpy(), mem["ItemWeight"].to_numpy()])
