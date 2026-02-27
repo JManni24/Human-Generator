@@ -1,0 +1,158 @@
+import re
+import pandas as pd
+import numpy as np
+from scipy.optimize import milp, LinearConstraint, Bounds
+
+FILE_PATH = "Human Calculator.xlsx"  # adjust if needed
+
+MENTAL = ["Empathy","Communication","Patience","Discipline","Leadership",
+          "Adaptability","Creativity","Focus","Logic","Wisdom"]
+BIO = ["Height","Intellect","LifeExp","Strength","Weight"]
+
+GLOBAL_MIN = {"Weight": 20.0, "Height": 30.0, "LifeExp": 10.0}
+RACK_CAPACITY = 100.0
+
+def tier_num(t):
+    if isinstance(t, str):
+        m = re.search(r"(\d+)", t)
+        return int(m.group(1)) if m else 0
+    return int(t) if not pd.isna(t) else 0
+
+def normalize_text(s):
+    # strips non breaking spaces from Excel
+    if isinstance(s, str):
+        return s.replace("\u00a0", " ").strip()
+    return s
+
+def load_tables(path):
+    careers = pd.read_excel(path, sheet_name="Careers")
+    food = pd.read_excel(path, sheet_name="Food")
+    mem = pd.read_excel(path, sheet_name="Memories")
+
+    careers = careers.rename(columns={
+        "Teir":"Tier",
+        "Intelect":"Intellect",
+        "Communications":"Communication",
+        "Disipline":"Discipline",
+        "Life Exp.":"LifeExp"
+    })
+
+    food = food.rename(columns={
+        "Unnamed: 0":"Food",
+        "Food Weight (Kg)":"ItemWeight",
+        "Life Exp.":"LifeExp"
+    })
+
+    mem = mem.rename(columns={
+        "Unnamed: 0":"Memory",
+        "Memory Weight (Kg)":"ItemWeight",
+        "Disipline":"Discipline"
+    })
+
+    # clean item names
+    food["Food"] = food["Food"].apply(normalize_text)
+    mem["Memory"] = mem["Memory"].apply(normalize_text)
+
+    careers["TierNum"] = careers["Tier"].apply(tier_num)
+
+    # fill NaNs in trait contribution columns
+    for col in BIO:
+        if col in food.columns:
+            food[col] = food[col].fillna(0)
+    for col in MENTAL:
+        if col in mem.columns:
+            mem[col] = mem[col].fillna(0)
+
+    return careers, food, mem
+
+def solve_for_job(job_row, food, mem, inv_food, inv_mem, capacity=RACK_CAPACITY):
+    food_names = food["Food"].tolist()
+    mem_names = mem["Memory"].tolist()
+    nF, nM = len(food_names), len(mem_names)
+
+    lb = np.zeros(nF + nM)
+    ub = np.array(
+        [inv_food.get(n, 0) for n in food_names] +
+        [inv_mem.get(n, 0) for n in mem_names],
+        dtype=float
+    )
+
+    # objective, minimize total ingredient weight used
+    w = np.concatenate([food["ItemWeight"].to_numpy(), mem["ItemWeight"].to_numpy()])
+    c = w.copy()
+
+    integrality = np.ones(nF + nM, dtype=int)
+
+    constraints = []
+
+    # rack capacity
+    A = w.reshape(1, -1)
+    constraints.append(LinearConstraint(A, -np.inf, capacity))
+
+    # job specific BIO requirements
+    for tr in BIO:
+        req = job_row.get(tr, np.nan)
+        if pd.isna(req):
+            continue
+        coef = np.concatenate([food[tr].to_numpy(), np.zeros(nM)])
+        constraints.append(LinearConstraint(coef, req, np.inf))
+
+    # job specific MENTAL requirements
+    for tr in MENTAL:
+        req = job_row.get(tr, np.nan)
+        if pd.isna(req):
+            continue
+        coef = np.concatenate([np.zeros(nF), mem[tr].to_numpy()])
+        constraints.append(LinearConstraint(coef, req, np.inf))
+
+    # global minimums always apply
+    for tr, req in GLOBAL_MIN.items():
+        coef = np.concatenate([food[tr].to_numpy(), np.zeros(nM)])
+        constraints.append(LinearConstraint(coef, req, np.inf))
+
+    res = milp(
+        c=c,
+        integrality=integrality,
+        bounds=Bounds(lb, ub),
+        constraints=constraints
+    )
+
+    if res.status != 0:
+        return None
+
+    x = res.x
+    used_food = {food_names[i]: int(round(x[i])) for i in range(nF) if x[i] > 1e-6}
+    used_mem = {mem_names[j]: int(round(x[nF + j])) for j in range(nM) if x[nF + j] > 1e-6}
+    total_ingredient_weight = float(np.dot(x, w))
+
+    return {
+        "used_food": used_food,
+        "used_mem": used_mem,
+        "total_ingredient_weight": total_ingredient_weight
+    }
+
+def best_job(path, inv_food, inv_mem):
+    careers, food, mem = load_tables(path)
+
+    # highest tier first, then you can add tie breakers later
+    careers_sorted = careers.sort_values(["TierNum"], ascending=False)
+
+    for _, row in careers_sorted.iterrows():
+        sol = solve_for_job(row, food, mem, inv_food, inv_mem)
+        if sol is not None:
+            return {
+                "CareerGroup": row["Career"],
+                "Tier": row["Tier"],
+                "Job": row["Job"],
+                "solution": sol
+            }
+
+    return None
+
+if __name__ == "__main__":
+    # Example inventory, replace with your real counts
+    inv_food = { }   # e.g. {"High-Fat": 10, "Mind Surge": 6}
+    inv_mem  = { }   # e.g. {"Blueprints": 2, "Camera": 1}
+
+    result = best_job(FILE_PATH, inv_food, inv_mem)
+    print(result)
